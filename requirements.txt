@@ -1,4 +1,6 @@
+streamlit
 qrcode[pil]
 opencv-python
 pyzbar
 Pillow
+pandas

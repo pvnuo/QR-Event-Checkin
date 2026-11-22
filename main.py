@@ -1,18 +1,13 @@
-"""
-QR Code Based Event Check-in System
-College Mini Project - Python
-Easy to explain: Generate QR → Scan → Mark attendance → Save in CSV
-"""
-
-import csv
-import os
-from datetime import datetime
-from pathlib import Path
-
-import cv2
+import streamlit as st
 import qrcode
+import cv2
+import pandas as pd
 from pyzbar.pyzbar import decode
 from PIL import Image
+from datetime import datetime
+from pathlib import Path
+import io
+import os
 
 # ==================== CONFIG ====================
 EVENT_NAME = "College Tech Fest 2026"
@@ -20,19 +15,38 @@ ATTENDANCE_FILE = "attendance.csv"
 QR_FOLDER = "qrcodes"
 # ================================================
 
+st.set_page_config(
+    page_title="QuickPass QR | Event Check-in",
+    page_icon="🎫",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS for better look
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 2.2rem;
+        font-weight: 700;
+        color: #1f77b4;
+        margin-bottom: 0;
+    }
+    .sub-header {
+        color: #666;
+        margin-top: 0;
+    }
+    .stSuccess {
+        background-color: #d4edda;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 def ensure_files():
-    """Create necessary folders and CSV file if they don't exist"""
     Path(QR_FOLDER).mkdir(exist_ok=True)
     if not Path(ATTENDANCE_FILE).exists():
-        with open(ATTENDANCE_FILE, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(["Ticket_ID", "Student_Name", "Check_In_Time"])
+        pd.DataFrame(columns=["Ticket_ID", "Student_Name", "Check_In_Time"]).to_csv(ATTENDANCE_FILE, index=False)
 
 def generate_qr(ticket_id: str, name: str):
-    """
-    Generate a QR code that stores: TicketID|StudentName
-    This QR will be scanned later for check-in
-    """
     data = f"{ticket_id}|{name}"
     qr = qrcode.QRCode(version=1, box_size=10, border=4)
     qr.add_data(data)
@@ -41,183 +55,178 @@ def generate_qr(ticket_id: str, name: str):
     
     path = Path(QR_FOLDER) / f"{ticket_id}_{name.replace(' ', '_')}.png"
     img.save(path)
-    print(f"[+] QR Generated → {path}")
-    return path
+    return path, img
 
 def mark_attendance(ticket_id: str, name: str):
-    """
-    Mark student as present.
-    Prevents double check-in of the same ticket.
-    """
     ensure_files()
+    df = pd.read_csv(ATTENDANCE_FILE)
     
-    # Check if already present
-    with open(ATTENDANCE_FILE, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            if row["Ticket_ID"] == ticket_id:
-                print(f"[!] Already Checked-In: {name} at {row['Check_In_Time']}")
-                return False
-
-    # New check-in
+    if ticket_id in df["Ticket_ID"].values:
+        return False, "Already Checked-In"
+    
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with open(ATTENDANCE_FILE, "a", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow([ticket_id, name, now])
-    
-    print(f"[✓] SUCCESS: {name} ({ticket_id}) checked in at {now}")
-    return True
+    new_row = pd.DataFrame([[ticket_id, name, now]], columns=["Ticket_ID", "Student_Name", "Check_In_Time"])
+    df = pd.concat([df, new_row], ignore_index=True)
+    df.to_csv(ATTENDANCE_FILE, index=False)
+    return True, now
 
-def scan_from_camera():
-    """Open webcam and continuously scan for QR codes"""
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        print("[!] Camera not found / permission denied")
-        return
-
-    print("[*] Camera started. Show QR code. Press 'Q' to stop.")
-    
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        # Decode any QR in the frame
-        decoded_objects = decode(frame)
-        for obj in decoded_objects:
-            data = obj.data.decode("utf-8")
-            if "|" in data:
-                ticket_id, name = data.split("|", 1)
-                mark_attendance(ticket_id.strip(), name.strip())
-                
-                # Draw green box around QR
-                points = obj.polygon
-                if len(points) > 2:
-                    for i in range(len(points)):
-                        cv2.line(frame, points[i], points[(i + 1) % len(points)], (0, 255, 0), 3)
-
-        cv2.imshow("QR Event Check-in - Press Q to Exit", frame)
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            break
-
-    cap.release()
-    cv2.destroyAllWindows()
-
-def scan_from_image(image_path: str):
-    """Scan QR code from a saved image file (useful for testing)"""
-    if not os.path.isfile(image_path):
-        print("[!] Image file not found")
-        return
-
-    img = Image.open(image_path)
-    decoded = decode(img)
+def scan_qr_image(uploaded_file):
+    image = Image.open(uploaded_file)
+    decoded = decode(image)
     
     if not decoded:
-        print("[!] No QR code found in this image")
-        return
-
-    for obj in decoded:
-        data = obj.data.decode("utf-8")
-        if "|" in data:
-            ticket_id, name = data.split("|", 1)
-            mark_attendance(ticket_id.strip(), name.strip())
-        else:
-            print(f"[!] Invalid QR format: {data}")
-
-def show_attendance():
-    """Display all checked-in students"""
-    ensure_files()
-    with open(ATTENDANCE_FILE, "r", encoding="utf-8") as f:
-        rows = list(csv.reader(f))
-
-    if len(rows) <= 1:
-        print("\nNo one has checked in yet.\n")
-        return
-
-    print(f"\n{'='*50}")
-    print(f"  {EVENT_NAME} - Attendance List")
-    print(f"{'='*50}")
-    print(f"{'Ticket':<12} {'Name':<20} {'Time'}")
-    print("-" * 50)
+        return None, None, "No QR code found in image"
     
-    for row in rows[1:]:  # skip header
-        print(f"{row[0]:<12} {row[1]:<20} {row[2]}")
+    data = decoded[0].data.decode("utf-8")
+    if "|" not in data:
+        return None, None, "Invalid QR format"
     
-    print("-" * 50)
-    print(f"Total Present: {len(rows)-1}")
-    print(f"{'='*50}\n")
+    ticket_id, name = data.split("|", 1)
+    return ticket_id.strip(), name.strip(), None
 
-def export_report():
-    """Create a simple text report for submission"""
-    ensure_files()
-    with open(ATTENDANCE_FILE, "r", encoding="utf-8") as f:
-        rows = list(csv.reader(f))
+# ==================== SIDEBAR ====================
+st.sidebar.title("🎫 QuickPass QR")
+st.sidebar.markdown(f"**Event:** {EVENT_NAME}")
+st.sidebar.markdown("---")
 
-    report_file = "attendance_report.txt"
-    with open(report_file, "w", encoding="utf-8") as f:
-        f.write(f"{EVENT_NAME}\n")
-        f.write(f"Attendance Report\n")
-        f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write("="*50 + "\n\n")
-        
-        if len(rows) <= 1:
-            f.write("No attendance recorded.\n")
-        else:
-            f.write(f"{'Ticket ID':<15} {'Student Name':<25} {'Check-in Time'}\n")
-            f.write("-"*65 + "\n")
-            for row in rows[1:]:
-                f.write(f"{row[0]:<15} {row[1]:<25} {row[2]}\n")
-            f.write("\n" + "-"*65 + "\n")
-            f.write(f"Total Students Checked-in: {len(rows)-1}\n")
+menu = st.sidebar.radio(
+    "Navigation",
+    ["🏠 Dashboard", "➕ Generate QR", "✅ Check-in", "📋 Attendance", "📥 Export Report"]
+)
 
-    print(f"[+] Report saved as → {report_file}")
+st.sidebar.markdown("---")
+st.sidebar.info("College Mini Project\nPython + Streamlit")
 
-def main_menu():
-    ensure_files()
-    while True:
-        print(f"""
-╔════════════════════════════════════════════╗
-║     {EVENT_NAME:<34} ║
-║          QR Code Event Check-in            ║
-╠════════════════════════════════════════════╣
-║  1. Generate QR for a student              ║
-║  2. Scan QR using Camera                   ║
-║  3. Scan QR from Image file                ║
-║  4. View Attendance List                   ║
-║  5. Export Attendance Report               ║
-║  6. Exit                                   ║
-╚════════════════════════════════════════════╝
-""")
-        choice = input("Enter your choice (1-6) → ").strip()
+# ==================== PAGES ====================
 
-        if choice == "1":
-            print("\n--- Generate QR ---")
-            tid = input("Enter Ticket / Roll No : ").strip()
-            name = input("Enter Student Name    : ").strip()
-            if tid and name:
-                generate_qr(tid, name)
+ensure_files()
+
+# ----- DASHBOARD -----
+if menu == "🏠 Dashboard":
+    st.markdown(f'<p class="main-header">QuickPass QR</p>', unsafe_allow_html=True)
+    st.markdown(f'<p class="sub-header">{EVENT_NAME} • Smart Event Check-in System</p>', unsafe_allow_html=True)
+    st.markdown("---")
+
+    df = pd.read_csv(ATTENDANCE_FILE)
+    total = len(df)
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Total Checked-In", total)
+    col2.metric("QR Codes Generated", len(list(Path(QR_FOLDER).glob("*.png"))))
+    col3.metric("Status", "Active ✅")
+
+    st.markdown("### How it works")
+    st.markdown("""
+    1. **Generate QR** → Create unique QR for each student (Ticket ID + Name)
+    2. **Check-in** → Upload / scan the QR image → attendance marked automatically
+    3. **View & Export** → See live list and download report
+    """)
+
+    if total > 0:
+        st.markdown("### Recent Check-ins")
+        st.dataframe(df.tail(5), use_container_width=True)
+
+# ----- GENERATE QR -----
+elif menu == "➕ Generate QR":
+    st.header("Generate Student QR Code")
+    st.markdown("Enter student details to create a unique QR code.")
+
+    with st.form("qr_form"):
+        ticket_id = st.text_input("Ticket / Roll Number", placeholder="e.g. 029")
+        name = st.text_input("Student Name", placeholder="e.g. Raman Yadav")
+        submitted = st.form_submit_button("Generate QR Code", type="primary")
+
+        if submitted:
+            if ticket_id.strip() and name.strip():
+                path, img = generate_qr(ticket_id.strip(), name.strip())
+                st.success(f"QR Generated successfully for **{name}**")
+                
+                col1, col2 = st.columns([1, 2])
+                with col1:
+                    st.image(img, caption=f"{ticket_id} - {name}", width=250)
+                with col2:
+                    st.code(f"File saved: {path}")
+                    buf = io.BytesIO()
+                    img.save(buf, format="PNG")
+                    st.download_button(
+                        "Download QR",
+                        data=buf.getvalue(),
+                        file_name=f"{ticket_id}_{name}.png",
+                        mime="image/png"
+                    )
             else:
-                print("[!] Both Ticket ID and Name are required")
+                st.error("Both Ticket ID and Name are required")
 
-        elif choice == "2":
-            scan_from_camera()
+# ----- CHECK-IN -----
+elif menu == "✅ Check-in":
+    st.header("Student Check-in")
+    st.markdown("Upload the student's QR code image to mark attendance.")
 
-        elif choice == "3":
-            path = input("Enter full path of image → ").strip()
-            scan_from_image(path)
+    uploaded = st.file_uploader("Upload QR Code Image", type=["png", "jpg", "jpeg"])
 
-        elif choice == "4":
-            show_attendance()
-
-        elif choice == "5":
-            export_report()
-
-        elif choice == "6":
-            print("\nThank you! Project closed.")
-            break
-
+    if uploaded:
+        st.image(uploaded, caption="Uploaded QR", width=250)
+        
+        ticket_id, name, error = scan_qr_image(uploaded)
+        
+        if error:
+            st.error(error)
         else:
-            print("[!] Invalid choice. Please enter 1 to 6.")
+            success, result = mark_attendance(ticket_id, name)
+            if success:
+                st.success(f"✅ **{name}** ({ticket_id}) checked in at **{result}**")
+                st.balloons()
+            else:
+                st.warning(f"⚠️ {name} ({ticket_id}) is already checked in")
 
-if __name__ == "__main__":
-    main_menu()
+# ----- ATTENDANCE -----
+elif menu == "📋 Attendance":
+    st.header("Attendance List")
+    df = pd.read_csv(ATTENDANCE_FILE)
+
+    if df.empty:
+        st.info("No students have checked in yet.")
+    else:
+        st.metric("Total Present", len(df))
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+# ----- EXPORT -----
+elif menu == "📥 Export Report":
+    st.header("Export Attendance Report")
+    df = pd.read_csv(ATTENDANCE_FILE)
+
+    if df.empty:
+        st.info("No data to export.")
+    else:
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+        # CSV download
+        csv = df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "Download CSV Report",
+            data=csv,
+            file_name=f"attendance_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+            mime="text/csv",
+            type="primary"
+        )
+
+        # Text report
+        report = f"""{EVENT_NAME}
+Attendance Report
+Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+{'='*50}
+
+Ticket ID          Student Name               Check-in Time
+{'-'*65}
+"""
+        for _, row in df.iterrows():
+            report += f"{row['Ticket_ID']:<18} {row['Student_Name']:<25} {row['Check_In_Time']}\n"
+        
+        report += f"\n{'-'*65}\nTotal Students Checked-in: {len(df)}\n"
+
+        st.download_button(
+            "Download Text Report",
+            data=report,
+            file_name="attendance_report.txt",
+            mime="text/plain"
+        )
